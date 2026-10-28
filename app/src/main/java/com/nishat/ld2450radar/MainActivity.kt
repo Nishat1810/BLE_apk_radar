@@ -167,38 +167,89 @@ class Ld2450Parser {
  * valid reports before being shown. This is a light temporal filter, not
  * proof that a reported target is a human.
  */
+/**
+ * Associates radar reports with persistent app-side track IDs by position.
+ * LD2450 target-slot numbers are not stable person identities and may swap.
+ * This tracker is best-effort; crossing/overlapping targets can still swap.
+ */
 class TargetStabilizer {
     private data class State(
         var target: RadarTarget,
-        var consecutiveHits: Int,
+        var hits: Int,
         var lastSeenAt: Long
     )
+
+    private data class Candidate(
+        val trackId: Int,
+        val targetIndex: Int,
+        val distanceMm: Double
+    )
+
     private val states = mutableMapOf<Int, State>()
+    private val maxTracks = 3
+    private val matchGateMm = 1800.0
+    private val keepAliveMs = 1000L
 
     fun update(current: List<RadarTarget>): List<RadarTarget> {
         val now = System.currentTimeMillis()
+        states.entries.removeAll { (_, state) -> now - state.lastSeenAt > keepAliveMs }
 
-        for (target in current) {
-            val old = states[target.id]
-            if (old != null && now - old.lastSeenAt <= 1000L && hypot(
-                    (target.xMm - old.target.xMm).toDouble(),
-                    (target.yMm - old.target.yMm).toDouble()
-                ) < 2500.0
-            ) {
-                // Refresh position/speed every report; tolerate brief empty reports.
-                old.target = target
-                old.consecutiveHits += 1
-                old.lastSeenAt = now
-            } else {
-                states[target.id] = State(target, 1, now)
+        // Build all possible old-track/new-report matches and take the closest
+        // pairs first so a changing hardware slot doesn't rename a person.
+        val candidates = mutableListOf<Candidate>()
+        for ((trackId, state) in states) {
+            if (now - state.lastSeenAt <= keepAliveMs) {
+                current.forEachIndexed { index, target ->
+                    val d = hypot(
+                        (target.xMm - state.target.xMm).toDouble(),
+                        (target.yMm - state.target.yMm).toDouble()
+                    )
+                    if (d <= matchGateMm) candidates += Candidate(trackId, index, d)
+                }
+            }
+        }
+        candidates.sortBy { it.distanceMm }
+
+        val assignedTracks = mutableSetOf<Int>()
+        val assignedTargets = mutableSetOf<Int>()
+        val targetToTrack = mutableMapOf<Int, Int>()
+
+        for (candidate in candidates) {
+            if (candidate.trackId !in assignedTracks &&
+                candidate.targetIndex !in assignedTargets) {
+                assignedTracks += candidate.trackId
+                assignedTargets += candidate.targetIndex
+                targetToTrack[candidate.targetIndex] = candidate.trackId
             }
         }
 
-        // Keep the last position briefly during short radar dropouts, then expire it.
-        states.entries.removeAll { (_, state) -> now - state.lastSeenAt > 900L }
-        return states.values
-            .filter { it.consecutiveHits >= 2 && now - it.lastSeenAt <= 900L }
-            .map { it.target }
+        current.forEachIndexed { index, reported ->
+            val trackId = targetToTrack[index] ?: run {
+                val freeId = (1..maxTracks).firstOrNull { it !in assignedTracks && it !in states }
+                    ?: (1..maxTracks).firstOrNull { it !in assignedTracks }
+                if (freeId == null) null else {
+                    assignedTracks += freeId
+                    targetToTrack[index] = freeId
+                    freeId
+                }
+            }
+
+            if (trackId != null) {
+                // Keep the app's stable track ID, not the radar's transient slot ID.
+                val stableTarget = reported.copy(id = trackId)
+                val old = states[trackId]
+                states[trackId] = State(
+                    target = stableTarget,
+                    hits = if (old != null && now - old.lastSeenAt <= keepAliveMs) old.hits + 1 else 1,
+                    lastSeenAt = now
+                )
+            }
+        }
+
+        return states.entries
+            .filter { (_, state) -> state.hits >= 2 && now - state.lastSeenAt <= keepAliveMs }
+            .map { it.value.target }
+            .sortedBy { it.id }
     }
 }
 
@@ -349,7 +400,11 @@ class BleRadarClient(private val context: Context) {
     }
 
     private fun handleIncoming(bytes: ByteArray) {
-        parser.feed(bytes).lastOrNull()?.let { onTargets?.invoke(it) }
+        // A BLE notification is only a fragment of the UART byte stream.
+        // Process every complete radar frame reconstructed from this fragment.
+        parser.feed(bytes).forEach { frameTargets ->
+            onTargets?.invoke(frameTargets)
+        }
     }
 }
 
@@ -682,8 +737,13 @@ private fun TargetCard(target: RadarTarget) {
             Text("X ${target.xMm} mm   ·   Y ${target.yMm} mm", color = Muted, fontSize = 11.sp)
         }
         Column(horizontalAlignment = Alignment.End) {
-            Text("${target.speedCms} cm/s", color = Cyan, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-            Text("${"%.2f".format(target.distanceMm / 1000.0)} m away", color = Muted, fontSize = 10.sp)
+            Text("${abs(target.speedCms)} cm/s", color = Cyan, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            Text(
+                if (abs(target.speedCms) < 5) "Low motion · ${"%.2f".format(target.distanceMm / 1000.0)} m"
+                else "Moving · ${"%.2f".format(target.distanceMm / 1000.0)} m",
+                color = Muted,
+                fontSize = 10.sp
+            )
         }
     }
 }
