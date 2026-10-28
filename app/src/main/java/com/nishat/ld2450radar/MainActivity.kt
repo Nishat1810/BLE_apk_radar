@@ -194,7 +194,7 @@ class TargetStabilizer {
         }
 
         // Expire missing slots quickly so the display does not leave ghosts.
-        states.entries.removeAll { (_, state) -> now - state.lastSeenAt > 450L }
+        states.entries.removeAll { (_, state) -> now - state.lastSeenAt > 1200L }
         return states.values
             .filter { it.consecutiveHits >= 2 && it.target.id in presentIds }
             .map { it.target }
@@ -613,7 +613,7 @@ private fun RadarCanvas(targets: List<RadarTarget>, maxDistance: Float, modifier
             targets.forEach { target ->
                 val range = maxDistance.coerceAtLeast(.2f)
                 val px = cx + (target.xMm / 1000f / range) * radius
-                val py = cy - (target.yMm / 1000f / range) * radius
+                val py = cy - (abs(target.yMm) / 1000f / range) * radius
                 if (px in 0f..size.width && py in 0f..size.height) {
                     drawCircle(Cyan.copy(alpha = .18f), 13.dp.toPx(), Offset(px, py))
                     drawCircle(Neon, 5.dp.toPx(), Offset(px, py))
