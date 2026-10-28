@@ -404,9 +404,10 @@ private fun RadarApp(activity: ComponentActivity) {
         }
     }
 
-    val filtered = targets.filter {
-        val d = it.distanceMm / 1000.0
-        d >= minDistance && d <= maxDistance && it.yMm >= -500
+   val filtered = targets.filter {
+    val d = it.distanceMm / 1000.0
+    d >= minDistance && d <= maxDistance
+   }
     }
 
     MaterialTheme(
